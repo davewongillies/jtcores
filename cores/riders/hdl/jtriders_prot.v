@@ -21,28 +21,29 @@ module jtriders_prot(
     input                clk,
     input                cen_16,
     input                cen_8,
+    input                tmnt2,
 
     input                cs,
-    input         [13:1] addr,
+    input         [19:1] addr,
     input         [ 1:0] dsn,
-    input         [15:0] din,
+    input         [15:0] din, // cpu dout
     output reg    [15:0] dout,
     input                cpu_we,
     input                ram_we,
 
     // DMA
+    output        [23:1] prot_addr,
+    input         [15:0] prot_din,
+    output         [1:0] prot_dsn,
+    output               prot_we,
+    input                bus_busy,
 
-    input                objsys_cs,
-    output               oram_cs,
     output        [13:1] oram_addr,
-    output        [15:0] oram_din,
-    input         [15:0] oram_dout,
-    output        [ 1:0] oram_we,
 
     output               irqn,
-    output reg           BRn,
+    output               BRn,
     input                BGn,
-    output reg           BGACKn,
+    output               BGACKn,
 
     input         [ 7:0] debug_bus
 );
@@ -64,6 +65,11 @@ reg [ 6:0] scan_addr;
 reg [ 1:0] st;
 reg        owr;
 
+reg        BRn_riders, BGACKn_riders;
+reg        BRn_tmnt2, BGACKn_tmnt2;
+assign     BRn = BRn_riders & BRn_tmnt2;
+assign     BGACKn = BGACKn_riders & BGACKn_tmnt2;
+
 // signal order expected at object chip pins
 // function [13:1] conv( input [6:0] a);
 // begin
@@ -79,33 +85,34 @@ begin
 end
 endfunction
 
-assign oram_addr = !BGACKn ? dma_addr     : conv13(addr);
-assign oram_din  = !BGACKn ? {2{hw_prio}} : din;
-assign oram_we   = !BGACKn ? {1'b0,owr}   : ~dsn & {2{cpu_we}};
-assign oram_cs   = !BGACKn ? 1'b1         : objsys_cs;
+assign prot_addr = !BGACKn_tmnt2 ? tmnt2_dma_addr[23:1] : {8'h18, 2'b00, dma_addr};
+assign prot_we   = !BGACKn_tmnt2 ? tmnt2_dma_write : !BGACKn_riders ? owr : 1'b0;
+assign prot_dsn  = !BGACKn_tmnt2 ? {2{tmnt2_mem_wait}} : !BGACKn_riders ? (owr ? 2'b10 : 2'b00) : 2'b11;
+
+assign oram_addr = !BGACKn_tmnt2 ? tmnt2_dma_addr[13:1] : !BGACKn_riders ? dma_addr     : conv13(addr);
 
 always @(posedge clk, posedge rst) begin
     if( rst ) begin
-        BRn        <= 1;
-        BGACKn     <= 1;
+        BRn_riders    <= 1;
+        BGACKn_riders <= 1;
         logic_prio <= 0;
         hw_prio    <= 0;
         scan_addr  <= 0;
         dma_addr   <= 0;
         st         <= 0;
-    end else begin
+    end else if (!tmnt2) begin
         if( cs && cpu_we && addr[7:1]==1 ) begin
-            BRn <= 0;
+            BRn_riders <= 0;
             logic_prio <= 1;
             hw_prio    <= 1;
             scan_addr  <= 0;
             st         <= 0;
         end
-        if( !BGn && !BRn) begin
+        if( !BGn && !BRn_riders) begin
             $display("DMA in progress");
-            {BRn, BGACKn} <= 2'b10;
+            {BRn_riders, BGACKn_riders} <= 2'b10;
         end
-        if( !BGACKn && cen_8 ) begin
+        if( !BGACKn_riders && cen_8 ) begin
             st <= st+2'd1;
             case( st )
             0: begin
@@ -113,7 +120,7 @@ always @(posedge clk, posedge rst) begin
                 owr      <= 0;
             end
             2: begin
-                if( oram_dout[15:8]==logic_prio) begin
+                if( prot_din[15:8]==logic_prio) begin
                     dma_addr <= {3'd0,scan_addr,3'd0};
                     owr      <= 1;
                 end
@@ -125,7 +132,7 @@ always @(posedge clk, posedge rst) begin
                 if( &scan_addr ) begin
                     logic_prio <= logic_prio<<1;
                     scan_addr  <= 0;
-                    if( logic_prio[7] ) BGACKn <= 1;
+                    if( logic_prio[7] ) BGACKn_riders <= 1;
                 end
             end
             endcase
@@ -154,7 +161,7 @@ always @(posedge clk, posedge rst) begin
     if( rst ) begin
         { cmd, odma, v0, v1, v2 } <= 0;
     end else if(ram_we) begin
-        case(addr)
+        case(addr[13:1])
             DATA: `WR16( odma )
             CMD:  `WR16( cmd  )
             V0:   `WR16( v0   )
@@ -164,20 +171,198 @@ always @(posedge clk, posedge rst) begin
         endcase
     end
 end
-`undef WR16
 
 always @(posedge clk) begin
-    calc <= vcalc;
-    case(cmd)
-        16'h100b: dout <= 16'h64;
-        16'h6003: dout <= {12'd0,odma[3:0]};
-        16'h6004: dout <= {11'd0,odma[4:0]};
-        16'h6000: dout <= {15'd0,odma[  0]};
-        16'h0000: dout <= { 8'd0,odma[7:0]};
-        16'h6007: dout <= { 8'd0,odma[7:0]};
-        16'h8abc: dout <= calc;
-        default:  dout <= 16'hffff;
-    endcase
+    if (!BGACKn_tmnt2)
+        dout <= tmnt2_dma_write_data;
+    else if (!BGACKn_riders)
+        dout <= {2{hw_prio}};
+    else begin
+        calc <= vcalc;
+        case(cmd)
+            16'h100b: dout <= 16'h64;
+            16'h6003: dout <= {12'd0,odma[3:0]};
+            16'h6004: dout <= {11'd0,odma[4:0]};
+            16'h6000: dout <= {15'd0,odma[  0]};
+            16'h0000: dout <= { 8'd0,odma[7:0]};
+            16'h6007: dout <= { 8'd0,odma[7:0]};
+            16'h8abc: dout <= calc;
+            default:  dout <= 16'hffff;
+        endcase
+    end
+end
+
+// TMNT2 MCU
+reg  [15:0] mcu[16], src[4], mod[24];
+wire [23:0] tmnt2_src_addr = {mcu[1][7:0], mcu[0]};
+wire [23:0] tmnt2_dst_addr = {mcu[3][7:0], mcu[2]};
+wire [23:0] tmnt2_mod_addr = {mcu[5][7:0], mcu[4]};
+wire        tmnt2_zlock = mcu[8][7:0] == 8'h01;
+
+reg  [23:1] tmnt2_dma_addr;
+reg  [ 6:0] tmnt2_scan_addr;
+reg  [ 1:0] tmnt2_st;
+wire        tmnt2_data_ok = ~bus_busy;
+wire [15:0] tmnt2_dma_data = prot_din;
+reg  [15:0] tmnt2_dma_data_r;
+reg         tmnt2_dma_write;
+reg  [15:0] tmnt2_dma_write_data;
+reg         tmnt2_mem_wait;
+
+always @(posedge clk, posedge rst) begin
+    if( rst ) begin
+        BRn_tmnt2    <= 1;
+        BGACKn_tmnt2 <= 1;
+        tmnt2_st <= 0;
+        tmnt2_mem_wait <= 1;
+        tmnt2_dma_write <= 0;
+    end else if (tmnt2) begin
+        if (cs && cpu_we) begin
+            `WR16( mcu[addr[4:1]] )
+            if(addr[4:1] == 4'hc && mcu[8][15:8] == 8'h82 && !dsn[1]) begin
+                tmnt2_mem_wait <= 1;
+                BRn_tmnt2 <= 0;
+                tmnt2_st <= 0;
+            end
+        end
+
+        if (tmnt2_data_ok && tmnt2_st != 3) begin
+            tmnt2_mem_wait <= 1;
+            if (!tmnt2_mem_wait) tmnt2_dma_data_r <= tmnt2_dma_data;
+        end
+
+        tmnt2_dma_write <= tmnt2_st == 3;
+
+        if( !BGn && !BRn_tmnt2 && cen_8 ) begin
+            $display("DMA in progress");
+            {BRn_tmnt2, BGACKn_tmnt2} <= 2'b10;
+            tmnt2_dma_addr <= tmnt2_src_addr[23:1];
+            tmnt2_scan_addr <= 0;
+            tmnt2_st <= 0;
+            tmnt2_mem_wait <= 0;
+        end
+        if( !BGACKn_tmnt2 && cen_8 ) begin
+            case (tmnt2_st)
+                // read source
+                0: if (tmnt2_mem_wait) begin
+                    tmnt2_mem_wait <= 0;
+                    tmnt2_dma_addr <= tmnt2_dma_addr + 1'd1;
+                    tmnt2_scan_addr <= tmnt2_scan_addr + 1'd1;
+                    src[tmnt2_scan_addr] <= tmnt2_dma_data_r;
+                    if (tmnt2_scan_addr == 3) begin
+                        tmnt2_scan_addr <= 0;
+                        tmnt2_st <= 1;
+                        tmnt2_dma_addr <= tmnt2_mod_addr[23:1];
+                    end
+                end
+                // read mod
+                1: if (tmnt2_mem_wait) begin
+                    tmnt2_mem_wait <= 0;
+                    tmnt2_dma_addr <= tmnt2_dma_addr + 1'd1;
+                    tmnt2_scan_addr <= tmnt2_scan_addr + 1'd1;
+                    mod[tmnt2_scan_addr] <= tmnt2_dma_data_r;
+                    if (tmnt2_scan_addr == 23) begin
+                        tmnt2_st <= 2;
+                        tmnt2_mem_wait <= 1;
+                    end
+                end
+                // calculate
+                2: begin
+                    tmnt2_dma_addr <= tmnt2_dst_addr[23:1];
+                    tmnt2_scan_addr <= 0;
+                    tmnt2_st <= 3;
+                    tmnt2_mem_wait <= 0;
+                end
+                // write sprite data
+                3: begin
+                    tmnt2_mem_wait <= 0;
+                    tmnt2_dma_addr <= tmnt2_dma_addr + 1'd1;
+                    tmnt2_scan_addr <= tmnt2_scan_addr + 1'd1;
+                    if (tmnt2_scan_addr == 3) begin
+                        tmnt2_dma_addr <= tmnt2_dma_addr + 2'd3;
+                    end else if (tmnt2_scan_addr == 4) begin
+                        tmnt2_st <= 0;
+                        tmnt2_mem_wait <= 1;
+                        BGACKn_tmnt2 <= 1;
+                    end
+                end
+            endcase
+        end
+    end
+end
+
+`undef WR16
+
+/*
+<------>code = src[0];          // code
+
+<------>i = src[1];
+<------>attr1 = i >> 2 & 0x3f00;    // flip y, flip x and sprite size
+<------>attr2 = i & 0x380;      // mirror y, mirror x, shadow
+<------>cbase = i & 0x01f;      // base color
+<------>cmod  = mod[0x2a / 2] >> 8;
+<------>color = (cbase != 0x0f && cmod <= 0x1f && !zlock) ? cmod : cbase;
+
+<------>xoffs = (int16_t)src[2];  // local x
+<------>yoffs = (int16_t)src[3];  // local y
+
+<------>i = mod[0];
+<------>attr2 |= i & 0x0060;    // priority
+<------>keepaspect = (i & 0x0014) == 0x0014;
+<------>if (i & 0x8000) { attr1 |= 0x8000; }    // active
+<------>if (keepaspect) { attr1 |= 0x4000; }    // keep aspect
+//  if (i & 0x????) { attr1 ^= 0x2000; yoffs = -yoffs; }    // flip y (not used?)
+<------>if (i & 0x4000) { attr1 ^= 0x1000; xoffs = -xoffs; }    // flip x
+
+<------>xmod = (int16_t)mod[6];   // global x
+<------>ymod = (int16_t)mod[7];   // global y
+<------>zmod = (int16_t)mod[8];   // global z
+<------>xzoom = mod[0x1c / 2];
+<------>yzoom = (keepaspect) ? xzoom : mod[0x1e / 2];
+
+<------>ylock = xlock = (i & 0x0020 && (!xzoom || xzoom == 0x100));
+*/
+reg  [15:0] code, i, attr1, attr2, xoffs, yoffs, xmod, ymod, zmod, xzoom, yzoom /* synthesis keep */;
+reg  [ 7:0] cbase, cmod, color;
+reg         keepaspect, xlock, ylock, zlock;
+
+always @(*) begin
+    code = src[0];
+    i = src[1];
+    keepaspect = mod[0][2] & mod[0][4];
+    attr1 = {mod[0][15], keepaspect, i[13:8], 8'd0};
+    attr2 = {7'd0, i[9:7], mod[0][6:5], 5'd0};
+    cbase = {3'd0, i[4:0]};
+    cmod = mod[21][15:8];
+    color = (cbase != 8'h0f && cmod <= 8'h1f && !tmnt2_zlock) ? cmod : cbase;
+    xoffs = src[2];
+    yoffs = src[3];
+    xmod = mod[6];
+    ymod = mod[7];
+    zmod = mod[8];
+
+    if (mod[0][14]) begin
+        attr1 = attr1 ^ 16'h1000;
+        xoffs = -xoffs;
+    end
+    xzoom = mod[14];
+    yzoom = keepaspect ? xzoom : mod[15];
+
+    xlock = (mod[0][5] && (xzoom == 0 || xzoom == 16'h100));
+    ylock = xlock;
+
+    if (!tmnt2_zlock) yoffs = yoffs + zmod;
+    xoffs = xoffs + xmod;
+    yoffs = yoffs + ymod;
+end
+
+always @(*) begin
+    if (tmnt2_scan_addr == 0)      tmnt2_dma_write_data = attr1;
+    else if (tmnt2_scan_addr == 1) tmnt2_dma_write_data = code;
+    else if (tmnt2_scan_addr == 2) tmnt2_dma_write_data = yoffs;
+    else if (tmnt2_scan_addr == 3) tmnt2_dma_write_data = xoffs;
+    else if (tmnt2_scan_addr == 4) tmnt2_dma_write_data = {attr2[15:5], color[4:0]};
+    else tmnt2_dma_write_data = 0;
 end
 
 endmodule

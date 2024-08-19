@@ -19,15 +19,15 @@
 module jtriders_main(
     input                rst,
     input                clk, // 48 MHz
+    input                cen_8,
+    input                cen_16,
     input                LVBL,
     input                xmen,
+    input                tmnt2,
 
-    output        [19:1] main_addr,
+    output        [23:1] main_addr,
     output        [ 1:0] ram_dsn,
-    output        [15:0] cpu_dout,
-    input                BRn,
-    input                BGACKn,
-    output               BGn,
+    output        [15:0] mbus_dout,
     // 8-bit interface
     output               cpu_we,
     output reg           pal_cs,
@@ -46,7 +46,6 @@ module jtriders_main(
     output reg           obj_cs,
 
     input         [15:0] oram_dout,
-    input         [15:0] prot_dout,
     input         [ 7:0] vram_dout,
     input         [15:0] pal_dout,
     input         [15:0] ram_dout,
@@ -55,8 +54,8 @@ module jtriders_main(
     input                rom_ok,
     input                vdtac,
     input                tile_irqn,
-    input                prot_irqn,
-    output reg           prot_cs,
+
+    output        [13:1] oram_addr, // object RAM address, mangled by the protection chip
 
     // Object RAM containing ROM address MSB bits, used in tmnt2
     output               omsb_we,
@@ -93,28 +92,36 @@ module jtriders_main(
 wire [23:1] A;
 wire        cpu_cen, cpu_cenb;
 wire        UDSn, LDSn, RnW, allFC, ASn, VPAn, DTACKn;
+wire        BGn, BRn, BGACKn;
 wire [ 2:0] FC;
 reg  [ 2:0] IPLn;
 reg         cab_cs, snd_cs, iowr_hi, iowr_lo, HALTn,
             eep_di, eep_clk, eep_cs, omsb_cs, intdma_enb,
-            sndon_r, pair_cs;
+            sndon_r, pair_cs, prot_cs;
 reg  [15:0] cpu_din, cab_dout;
 wire        eep_rdy, eep_do, bus_cs, bus_busy, BUSn;
+reg         bus_busy_r;
 wire        dtac_mux, intdma, IPLn1;
+wire [15:0] cpu_dout, prot_dout;
+wire [23:1] prot_addr;
+wire        prot_we;
+wire  [1:0] prot_dsn;
+wire        prot_irqn;
 
 `ifdef SIMULATION
 wire [23:0] A_full = {A,1'b0};
 `endif
 /* verilator tracing_off */
-assign main_addr= A[19:1];
-assign ram_dsn  = {UDSn, LDSn};
+assign main_addr= !BGACKn ? prot_addr : A[23:1];
+assign mbus_dout= !BGACKn ? prot_dout : cpu_dout;
+assign ram_dsn  = !BGACKn ? prot_dsn  : {UDSn, LDSn};
 assign bus_cs   = rom_cs | ram_cs;
 assign bus_busy = (rom_cs & ~rom_ok) | (ram_cs & ~ram_ok);
-assign BUSn     = ASn | (LDSn & UDSn);
+assign BUSn     = !BGACKn ? &prot_dsn : (ASn | (LDSn & UDSn));
 
-assign cpu_we   = ~RnW;
-assign omsb_we  = omsb_cs && cpu_we && !LDSn;
-assign omsb_addr= { cbnk, A[6:1] };
+assign cpu_we   = !BGACKn ? prot_we : ~RnW;
+assign omsb_we  = omsb_cs && ~RnW && !LDSn;
+assign omsb_addr= { cbnk, main_addr[6:1] };
 
 assign st_dout  = 0; //{ rmrd, 1'd0, prio, div8, game_id };
 assign VPAn     = ~&{ BGACKn, FC[1:0], ~ASn };
@@ -143,15 +150,15 @@ always @* begin
     prot_cs  = 0;
     pair_cs  = 0;
     wdog     = 0;
-    if(!ASn) begin
+    if(~&prot_dsn | !ASn) begin
         // tmnt2/ssriders
-        if(!xmen) case(A[23:20])
+        if(!xmen) case(main_addr[23:20])
             0: rom_cs = 1;
-            1: case(A[19:18])
-                0: ram_cs  = A[14] & ~BUSn;
+            1: case(main_addr[19:18])
+                0: ram_cs  = main_addr[14] & ~BUSn;
                 1: pal_cs  = 1;  // 14'xxxx
                 2: obj_cs  = 1;  // 18'xxxx (not all A bits go to OBJ chip 053245)
-                3: case(A[11:8]) // decoder 13G (pdf page 16)
+                3: case(main_addr[11:8]) // decoder 13G (pdf page 16)
                   0,1: cab_cs  = 1;
                     2: iowr_lo = 1; // EEPROM
                     3: iowr_hi = 1;
@@ -162,12 +169,12 @@ always @* begin
                 endcase
                 default:;
             endcase
-            5: case(A[19:16])
+            5: case(main_addr[19:16])
                 4'ha: objreg_cs = 1;
-                4'hc: case(A[11:8]) // 13G
+                4'hc: case(main_addr[11:8]) // 13G
                     6: begin
-                        snd_cs = !A[2]; // 053260
-                        sndon  =  A[2];
+                        snd_cs = !main_addr[2]; // 053260
+                        sndon  =  main_addr[2];
                     end
                     7: pcu_cs = 1;      // 053251
                     default:;
@@ -179,19 +186,19 @@ always @* begin
         endcase
         // xmen (from PAL equations)
         if(xmen) begin
-            rom_cs  = ~A[20];
-            ram_cs  =  A[20:14]==7'b1000100 & ~BUSn;
-            obj_cs  =  A[20:14]==7'b1000000;
-            pal_cs  =  A[20:13]==8'b10000010;
-            vram_cs = ~A[23] & A[20] & A[19];
-            iowr_lo =  A[20:13]==8'b1_0000_100; // IO1 in schematics
-            iowr_hi =  A[20:13]==8'b1_0000_101; // IO2 in schematics
-            cab_cs  = iowr_hi && !A[3];
+            rom_cs  = ~main_addr[20];
+            ram_cs  =  main_addr[20:14]==7'b1000100 & ~BUSn;
+            obj_cs  =  main_addr[20:14]==7'b1000000;
+            pal_cs  =  main_addr[20:13]==8'b10000010;
+            vram_cs = ~main_addr[23] & main_addr[20] & main_addr[19];
+            iowr_lo =  main_addr[20:13]==8'b1_0000_100; // IO1 in schematics
+            iowr_hi =  main_addr[20:13]==8'b1_0000_101; // IO2 in schematics
+            cab_cs  = iowr_hi && !main_addr[3];
             // cr_cs = iowr_hi && A[3:2]==3;
             wdog    = iowr_hi && !RnW;
-            objreg_cs = iowr_lo && A[6:5]==1;
-            pair_cs   = iowr_lo && A[6:5]==2;
-            pcu_cs    = iowr_lo && A[6:5]==3;
+            objreg_cs = iowr_lo && main_addr[6:5]==1;
+            pair_cs   = iowr_lo && main_addr[6:5]==2;
+            pcu_cs    = iowr_lo && main_addr[6:5]==3;
         end
     end
 `ifdef SIMULATION
@@ -223,6 +230,7 @@ always @(posedge clk) begin
                pair_cs ? {8'd0,pair_dout}:
                omsb_cs ? {8'd0,omsb_dout}:
                cab_cs  ? cab_dout        : 16'hffff;
+     bus_busy_r <= bus_busy; // same delay as for cpu_din
 end
 
 reg fake_dma=0, cabcs_l;
@@ -361,6 +369,39 @@ jtframe_m68k u_cpu(
     .DTACKn     ( dtac_mux    ),
     .IPLn       ( IPLn        ) // VBLANK
 );
+
+/* verilator tracing_off */
+jtriders_prot u_prot(
+    .rst        ( rst       ),
+    .clk        ( clk       ),
+    .cen_16     ( cen_16    ),
+    .cen_8      ( cen_8     ),
+    .tmnt2      ( tmnt2     ),
+
+    .cs         ( prot_cs   ),
+    .addr       ( main_addr[19:1]),
+    .cpu_we     ( cpu_we    ),
+    .din        ( cpu_dout  ),
+    .dout       ( prot_dout ),
+    .ram_we     ( cpu_we & ram_cs ), // includes ram_cs as part of ram_we
+    .dsn        ( ram_dsn   ),
+    // DMA
+    .prot_addr  ( prot_addr ),
+    .prot_din   ( cpu_din   ),
+    .prot_dsn   ( prot_dsn  ),
+    .prot_we    ( prot_we   ),
+    .oram_addr  ( oram_addr ),
+    .bus_busy   ( bus_busy | bus_busy_r ),
+    .irqn       ( prot_irqn ),
+    .BRn        ( BRn       ),
+    .BGn        ( BGn       ),
+    .BGACKn     ( BGACKn    ),
+
+    .debug_bus  ( debug_bus )
+);
+
+/* verilator tracing_on */
+
 `else
     initial begin
         sndon   = 0;

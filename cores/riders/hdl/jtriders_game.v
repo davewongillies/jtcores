@@ -28,7 +28,7 @@ localparam [2:0] SSRIDERS = 3'd0,
 wire        snd_irq, rmrd, rst8, dimmod, dimpol, dma_bsy,
             pal_cs, cpu_we, tilesys_cs, objsys_cs, pcu_cs, mute, objcha_n,
             cpu_rnw, vdtac, tile_irqn, tile_nmin, snd_wrn, oaread_en,
-            BGn, BRn, BGACKn, prot_irqn, prot_cs, objreg_cs, oram_cs, pair_we;
+            prot_irqn, prot_cs, objreg_cs, oram_cs, pair_we;
 wire [15:0] pal_dout, oram_dout, prot_dout, oram_din;
 wire [13:1] oram_addr;
 reg  [ 7:0] debug_mux;
@@ -39,12 +39,15 @@ wire [ 7:0] tilesys_dout, snd2main,
             st_main, st_video;
 wire [ 2:0] dim;
 wire [ 1:0] oram_we;
+wire [15:0] cpu_dout;
 
 assign debug_view = debug_mux;
 assign ram_we     = cpu_we & ram_cs;
 assign ram_addr   = main_addr[13:1];
+assign ram_din    = cpu_dout;
 assign omsb_din   = ram_din[7:0];
 assign oaread_en  = tmnt2;
+assign oram_we    = ~ram_dsn & {2{cpu_we}};
 
 always @(posedge clk) begin
     case( debug_bus[7:6] )
@@ -67,23 +70,18 @@ end
 jtriders_main u_main(
     .rst            ( rst           ),
     .clk            ( clk           ),
+    .cen_8          ( cen_8         ),
+    .cen_16         ( cen_16        ),
     .LVBL           ( LVBL          ),
     .xmen           ( xmen          ),
+    .tmnt2          ( tmnt2         ),
 
     .cpu_we         ( cpu_we        ),
-    .cpu_dout       ( ram_din       ),
+    .mbus_dout      ( cpu_dout      ),
     .vdtac          ( vdtac         ),
     .tile_irqn      ( tile_irqn     ),
 
-    // protection chip
-    .BGACKn         ( BGACKn        ),
-    .BRn            ( BRn           ),
-    .BGn            ( BGn           ),
-    .prot_irqn      ( prot_irqn     ),
-    .prot_cs        ( prot_cs       ),
-    .prot_dout      ( prot_dout     ),
-
-    .main_addr      ( main_addr     ),
+    .main_addr      ( main_addr[19:1]),
     .rom_data       ( main_data     ),
     .rom_cs         ( main_cs       ),
     .rom_ok         ( main_ok       ),
@@ -104,6 +102,7 @@ jtriders_main u_main(
     .vram_dout      ( tilesys_dout  ),
     .oram_dout      ( oram_dout     ),
     .pal_dout       ( pal_dout      ),
+    .oram_addr      ( oram_addr     ),
     // Object MSB RAM
     .omsb_we        ( omsb_we       ),
     .omsb_addr      ( omsb_addr     ),
@@ -142,36 +141,6 @@ jtriders_main u_main(
     .debug_bus      ( debug_bus     )
 );
 
-/* verilator tracing_off */
-jtriders_prot u_prot(
-    .rst        ( rst       ),
-    .clk        ( clk       ),
-    .cen_16     ( cen_16    ),
-    .cen_8      ( cen_8     ),
-
-    .cs         ( prot_cs   ),
-    .addr       (main_addr[13:1]),
-    .cpu_we     ( cpu_we    ),
-    .din        ( ram_din   ), // = cpu_dout
-    .dout       ( prot_dout ),
-    .ram_we     ( ram_we    ), // includes ram_cs as part of ram_we
-    .dsn        ( ram_dsn   ),
-    // DMA
-    .objsys_cs  ( objsys_cs ),
-    .oram_cs    ( oram_cs   ),
-    .oram_addr  ( oram_addr ),
-    .oram_din   ( oram_din  ),
-    .oram_dout  ( oram_dout ),
-    .oram_we    ( oram_we   ),
-    .irqn       ( prot_irqn ),
-    .BRn        ( BRn       ),
-    .BGn        ( BGn       ),
-    .BGACKn     ( BGACKn    ),
-
-    .debug_bus  ( debug_bus )
-);
-
-/* verilator tracing_on */
 jtriders_video u_video (
     .rst            ( rst           ),
     .rst8           ( rst8          ),
@@ -180,7 +149,7 @@ jtriders_video u_video (
     .pxl2_cen       ( pxl2_cen      ),
 
     .xmen           ( xmen          ),
-    .ssriders       ( ssriders      ),
+    .ssriders       ( ssriders | tmnt2 ),
 
     .tile_irqn      ( tile_irqn     ),
     .tile_nmin      (               ),
@@ -192,7 +161,7 @@ jtriders_video u_video (
     .flip           ( dip_flip      ),
     // Object DMA
     .oram_we        ( oram_we       ),
-    .oram_din       ( oram_din      ),
+    .oram_din       ( cpu_dout      ),
     .oram_addr      ( oram_addr     ),
     // RAM with ROM MSB address for tile ROM
     .oaread_en      ( oaread_en     ),
@@ -200,15 +169,15 @@ jtriders_video u_video (
     .oaread_addr    ( oaread_addr   ),
     // GFX - CPU interface
     .cpu_we         ( cpu_we        ),
-    .objsys_cs      ( oram_cs       ),
+    .objsys_cs      ( objsys_cs     ),
     .objreg_cs      ( objreg_cs     ),
     .objcha_n       ( objcha_n      ),
     .tilesys_cs     ( tilesys_cs    ),
     .pal_cs         ( pal_cs        ),
     .pcu_cs         ( pcu_cs        ),
-    .cpu_addr       (main_addr[16:1]),
+    .cpu_addr       ( main_addr[16:1]),
     .cpu_dsn        ( ram_dsn       ),
-    .cpu_dout       ( ram_din       ),
+    .cpu_dout       ( cpu_dout      ),
     .vdtac          ( vdtac         ),
     .tilesys_dout   ( tilesys_dout  ),
     .objsys_dout    ( oram_dout     ),
@@ -261,7 +230,7 @@ jtriders_sound u_sound(
     .pair_we    ( pair_we       ),
     .pair_dout  ( pair_dout     ),
     // communication with main CPU
-    .main_dout  ( ram_din[7:0]  ),
+    .main_dout  ( cpu_dout[7:0] ),
     .main_din   ( snd2main      ),
     .main_addr  ( main_addr[4:1]),
     .main_rnw   ( snd_wrn       ),
