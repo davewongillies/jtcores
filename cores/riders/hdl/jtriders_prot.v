@@ -89,7 +89,7 @@ assign prot_addr = !BGACKn_tmnt2 ? tmnt2_dma_addr[23:1] : {8'h18, 2'b00, dma_add
 assign prot_we   = !BGACKn_tmnt2 ? tmnt2_dma_write : !BGACKn_riders ? owr : 1'b0;
 assign prot_dsn  = !BGACKn_tmnt2 ? {2{tmnt2_mem_wait}} : !BGACKn_riders ? (owr ? 2'b10 : 2'b00) : 2'b11;
 
-assign oram_addr = !BGACKn_tmnt2 ? tmnt2_dma_addr[13:1] : !BGACKn_riders ? dma_addr     : conv13(addr);
+assign oram_addr = !BGACKn_tmnt2 ? conv13(tmnt2_dma_addr[13:1]) : !BGACKn_riders ? dma_addr     : conv13(addr);
 
 always @(posedge clk, posedge rst) begin
     if( rst ) begin
@@ -233,7 +233,7 @@ always @(posedge clk, posedge rst) begin
 
         tmnt2_dma_write <= tmnt2_st == 3;
 
-        if( !BGn && !BRn_tmnt2 && cen_8 ) begin
+        if( !BGn && !BRn_tmnt2 && cen_16 ) begin
             $display("DMA in progress");
             {BRn_tmnt2, BGACKn_tmnt2} <= 2'b10;
             tmnt2_dma_addr <= tmnt2_src_addr[23:1];
@@ -241,7 +241,7 @@ always @(posedge clk, posedge rst) begin
             tmnt2_st <= 0;
             tmnt2_mem_wait <= 0;
         end
-        if( !BGACKn_tmnt2 && cen_8 ) begin
+        if( !BGACKn_tmnt2 && cen_16 ) begin
             case (tmnt2_st)
                 // read source
                 0: if (tmnt2_mem_wait) begin
