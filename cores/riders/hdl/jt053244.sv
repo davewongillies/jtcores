@@ -279,7 +279,7 @@ always @(posedge clk, posedge rst) begin
                             hz_keep <= 1;
                         end
                         hstep <= hstep + 1'd1;
-                        dr_start <= inzone; //ELIMINAR
+                        dr_start <= inzone;
                         if( hdone || !inzone ) begin
                             { indr, scan_sub } <= 0;
                             scan_obj <= scan_obj + 1'd1;
